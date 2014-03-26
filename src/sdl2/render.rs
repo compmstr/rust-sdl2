@@ -175,6 +175,7 @@ pub enum RendererFlip {
     FlipNone = ll::SDL_FLIP_NONE as int,
     FlipHorizontal = ll::SDL_FLIP_HORIZONTAL as int,
     FlipVertical = ll::SDL_FLIP_VERTICAL as int,
+	FlipBoth = ll::SDL_FLIP_HORIZONTAL as int | ll::SDL_FLIP_VERTICAL as int,
 }
 
 impl RendererInfo {
