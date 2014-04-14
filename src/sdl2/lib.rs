@@ -6,6 +6,7 @@
 
 #![feature(globs)]
 
+extern crate libc;
 extern crate collections;
 
 pub use sdl::*;
@@ -29,3 +30,4 @@ pub mod timer;
 pub mod render;
 pub mod rwops;
 pub mod sdl;
+pub mod audio;
