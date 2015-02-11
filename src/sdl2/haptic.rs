@@ -1,2 +1,3 @@
 //! Haptic Functions
-pub use sys::haptic as ll;
+#[allow(unused)]
+use sys::haptic as ll;

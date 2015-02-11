@@ -1,6 +1,11 @@
 #![allow(non_camel_case_types)]
 
+#![feature(core)]
+
 extern crate libc;
+
+pub mod scancode;
+pub mod keycode;
 
 pub mod audio;
 pub mod clipboard;

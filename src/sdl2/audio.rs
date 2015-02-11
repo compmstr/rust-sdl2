@@ -1,15 +1,14 @@
 //! Audio Functions
-use std::borrow::ToOwned;
 use std::ffi::{c_str_to_bytes, CString};
 use std::num::FromPrimitive;
-use libc::{self, c_int, c_void, size_t, uint8_t};
+use libc::{c_int, c_void, uint8_t};
 use std::ops::{Deref, DerefMut};
 
 use get_error;
 use rwops::RWops;
 use SdlResult;
 
-pub use sys::audio as ll;
+use sys::audio as ll;
 
 pub type AudioFormat = ll::SDL_AudioFormat;
 
@@ -33,29 +32,29 @@ pub const AUDIOS32SYS : AudioFormat = ll::AUDIO_S32SYS;
 pub const AUDIOF32SYS : AudioFormat = ll::AUDIO_F32SYS;
 
 #[repr(C)]
-#[derive(Copy, Clone, PartialEq, Hash, Show, FromPrimitive)]
+#[derive(Copy, Clone, PartialEq, Hash, Debug, FromPrimitive)]
 pub enum AudioStatus {
     Stopped = ll::SDL_AUDIO_STOPPED as isize,
     Playing = ll::SDL_AUDIO_PLAYING as isize,
     Paused  = ll::SDL_AUDIO_PAUSED  as isize,
 }
 
-pub fn get_num_audio_drivers() -> isize {
-    unsafe { ll::SDL_GetNumAudioDrivers() as isize }
+pub fn get_num_audio_drivers() -> i32 {
+    unsafe { ll::SDL_GetNumAudioDrivers() as i32 }
 }
 
-pub fn get_audio_driver(index: isize) -> String {
+pub fn get_audio_driver(index: i32) -> String {
     unsafe {
         let driver = ll::SDL_GetAudioDriver(index as c_int);
         String::from_utf8_lossy(c_str_to_bytes(&driver)).to_string()
     }
 }
 
-pub fn get_num_audio_devices(iscapture: isize) -> isize {
-    unsafe { ll::SDL_GetNumAudioDevices(iscapture as c_int) as isize }
+pub fn get_num_audio_devices(iscapture: i32) -> i32 {
+    unsafe { ll::SDL_GetNumAudioDevices(iscapture as c_int) as i32 }
 }
 
-pub fn get_audio_device_name(index: isize, iscapture: isize) -> String {
+pub fn get_audio_device_name(index: i32, iscapture: i32) -> String {
     unsafe {
         let dev_name = ll::SDL_GetAudioDeviceName(index as c_int, iscapture as c_int);
         String::from_utf8_lossy(c_str_to_bytes(&dev_name)).to_string()
@@ -141,7 +140,7 @@ impl Drop for AudioSpecWAV {
     }
 }
 
-pub trait AudioCallback<T> {
+pub trait AudioCallback<T>: Send {
     fn callback(&mut self, &mut [T]);
 }
 
@@ -207,11 +206,12 @@ extern "C" fn audio_callback_marshall<T: AudioFormatNum<T>, CB: AudioCallback<T>
 pub struct AudioSpecDesired<T: AudioFormatNum<T>, CB: AudioCallback<T>> {
     pub freq: i32,
     pub channels: u8,
+    pub samples: u16,
     pub callback: CB
 }
 
 impl<T: AudioFormatNum<T>, CB: AudioCallback<T>> AudioSpecDesired<T, CB> {
-    fn convert_to_ll(freq: i32, channels: u8, userdata: &mut AudioCallbackUserdata<CB>) -> ll::SDL_AudioSpec {
+    fn convert_to_ll(freq: i32, channels: u8, samples: u16, userdata: &mut AudioCallbackUserdata<CB>) -> ll::SDL_AudioSpec {
         use std::mem::transmute;
 
         let format_num: T = AudioFormatNum::zero();
@@ -222,7 +222,7 @@ impl<T: AudioFormatNum<T>, CB: AudioCallback<T>> AudioSpecDesired<T, CB> {
                 format: format_num.get_audio_format(),
                 channels: channels,
                 silence: 0,
-                samples: 0,
+                samples: samples,
                 padding: 0,
                 size: 0,
                 callback: Some(audio_callback_marshall::<T, CB>
@@ -249,7 +249,7 @@ impl<T: AudioFormatNum<T>, CB: AudioCallback<T>> AudioSpecDesired<T, CB> {
         use libc::c_char;
 
         let mut userdata = AudioSpecDesired::callback_to_userdata(self.callback);
-        let desired = AudioSpecDesired::convert_to_ll(self.freq, self.channels, &mut *userdata);
+        let desired = AudioSpecDesired::convert_to_ll(self.freq, self.channels, self.samples, &mut *userdata);
 
         let mut obtained = unsafe { uninitialized::<ll::SDL_AudioSpec>() };
         unsafe {
@@ -287,7 +287,7 @@ impl<T: AudioFormatNum<T>, CB: AudioCallback<T>> AudioSpecDesired<T, CB> {
 }
 
 #[allow(missing_copy_implementations)]
-#[derive(Show)]
+#[derive(Debug)]
 pub struct AudioSpec {
     pub freq: i32,
     // TODO: Showing format should be prettier
@@ -345,7 +345,7 @@ impl<CB> AudioDevice<CB> {
     pub fn get_status(&self) -> AudioStatus {
         unsafe {
             let status = ll::SDL_GetAudioDeviceStatus(self.device_id.id());
-            FromPrimitive::from_int(status as isize).unwrap()
+            FromPrimitive::from_i32(status as i32).unwrap()
         }
     }
 
@@ -389,6 +389,8 @@ pub struct AudioDeviceLockGuard<'a, CB: 'a> {
     device: &'a mut AudioDevice<CB>
 }
 
+impl<'a, CB: 'a> !Send for AudioDeviceLockGuard<'a, CB> {}
+
 impl<'a, CB: 'a> Deref for AudioDeviceLockGuard<'a, CB> {
     type Target = CB;
     fn deref(&self) -> &CB { &self.device.userdata.callback }
@@ -405,35 +407,23 @@ impl<'a, CB> Drop for AudioDeviceLockGuard<'a, CB> {
     }
 }
 
-#[derive(PartialEq)] #[allow(raw_pointer_derive)]
+#[derive(Copy)]
 pub struct AudioCVT {
-    raw: *mut ll::SDL_AudioCVT,
-    owned: bool,
-}
-
-impl_raw_accessors!( (AudioCVT, *mut ll::SDL_AudioCVT) );
-impl_owned_accessors!( (AudioCVT, owned) );
-
-impl Drop for AudioCVT {
-    fn drop(&mut self) {
-        if self.owned {
-            unsafe { libc::free(self.raw as *mut c_void) }
-        }
-    }
+    raw: ll::SDL_AudioCVT
 }
 
 impl AudioCVT {
     pub fn new(src_format: ll::SDL_AudioFormat, src_channels: u8, src_rate: i32,
-               dst_format: ll::SDL_AudioFormat, dst_channels: u8, dst_rate: i32) -> SdlResult<AudioCVT> {
-        
+               dst_format: ll::SDL_AudioFormat, dst_channels: u8, dst_rate: i32) -> SdlResult<AudioCVT>
+    {
         use std::mem;
         unsafe {
-            let c_cvt_p = libc::malloc(mem::size_of::<ll::SDL_AudioCVT>() as size_t) as *mut ll::SDL_AudioCVT;
-            let ret = ll::SDL_BuildAudioCVT(c_cvt_p,
+            let mut raw: ll::SDL_AudioCVT = mem::uninitialized();
+            let ret = ll::SDL_BuildAudioCVT(&mut raw,
                                             src_format, src_channels, src_rate as c_int,
                                             dst_format, dst_channels, dst_rate as c_int);
             if ret == 1 || ret == 0 {
-                Ok(AudioCVT { raw: c_cvt_p, owned: true })
+                Ok(AudioCVT { raw: raw })
             } else {
                 Err(get_error())
             }
@@ -441,37 +431,51 @@ impl AudioCVT {
     }
 
     #[unstable="Certain conversions may cause buffer overflows. See AngryLawyer/rust-sdl2 issue #270."]
-    pub fn convert(&self, mut src: Vec<u8>) -> SdlResult<Vec<u8>> {
+    pub fn convert(&self, mut src: Vec<u8>) -> Vec<u8> {
         //! Convert audio data to a desired audio format.
         //!
         //! The `src` vector is adjusted to the capacity necessary to perform
         //! the conversion in place; then it is passed to the SDL library.
+        use std::num;
         unsafe {
-            if (*self.raw).needed != 1 {
-                return Err("no conversion needed!".to_owned())
-            }
+            if self.raw.needed != 0 {
+                let mut raw = self.raw;
 
-            // calculate the size of the dst buffer
-            (*self.raw).len = src.len() as c_int;
-            let dst_size = ( (*self.raw).len * (*self.raw).len_mult ) as usize;
-            let needed = dst_size - src.len();
-            src.reserve_exact(needed);
+                // calculate the size of the dst buffer
+                raw.len = num::cast(src.len()).expect("Buffer length overflow");
+                let dst_size = self.get_capacity(src.len());
+                let needed = dst_size - src.len();
+                src.reserve_exact(needed);
 
-            // perform the conversion in place
-            (*self.raw).buf = src.as_mut_ptr();
-            let ret = ll::SDL_ConvertAudio(self.raw);
+                // perform the conversion in place
+                raw.buf = src.as_mut_ptr();
+                let ret = ll::SDL_ConvertAudio(&mut raw);
+                // There's no reason for SDL_ConvertAudio to fail.
+                // The only time it can fail is if buf is NULL, which it never is.
+                if ret != 0 { panic!(get_error()) }
 
-            // return original buffer back to caller
-            if ret == 0 {
-                debug_assert!( (*self.raw).len_cvt > 0 );
-                debug_assert!( (*self.raw).len_cvt as usize <= src.capacity() );
+                // return original buffer back to caller
+                debug_assert!(raw.len_cvt > 0);
+                debug_assert!(raw.len_cvt as usize <= src.capacity());
 
-                src.set_len((*self.raw).len_cvt as usize);
-                Ok(src)
+                src.set_len(raw.len_cvt as usize);
+                src
             } else {
-                Err(get_error())
+                // The buffer remains unmodified
+                src
             }
         }
+    }
+
+    /// Checks if any conversion is needed. i.e. if the buffer that goes
+    /// into `convert()` is unchanged from the result.
+    pub fn is_conversion_needed(&self) -> bool { self.raw.needed != 0 }
+
+    /// Gets the buffer capacity that can contain both the original and
+    /// converted data.
+    pub fn get_capacity(&self, src_len: usize) -> usize {
+        use std::num::Int;
+        src_len.checked_mul(self.raw.len_mult as usize).expect("Integer overflow")
     }
 }
 
@@ -487,11 +491,14 @@ mod test {
         // 0,1,2,3, ...
         let buffer: Vec<u8> = range(0, 255).collect();
 
-        // 0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3, ...
+        // 0,0,1,1,2,2,3,3, ...
         let new_buffer_expected: Vec<u8> = range(0, 255).flat_map(|v| repeat(v).take(2)).collect();
 
         let cvt = AudioCVT::new(AUDIOU8, 1, 44100, AUDIOU8, 2, 44100).unwrap();
-        let new_buffer = cvt.convert(buffer).unwrap();
+        assert!(cvt.is_conversion_needed());
+        assert_eq!(cvt.get_capacity(255), 255*2);
+
+        let new_buffer = cvt.convert(buffer);
         assert_eq!(new_buffer.len(), new_buffer_expected.len());
         assert_eq!(new_buffer, new_buffer_expected);
     }
